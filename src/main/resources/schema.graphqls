@@ -1,0 +1,49 @@
+type Rol {
+    id: ID!
+    nombreRol: String!
+    descripcion: String
+    fechaCreacion: String
+}
+
+type Usuario {
+    id: ID!
+    username: String!
+    email: String!
+    nombre: String
+    apellido: String
+    rol: Rol!
+    activo: Boolean!
+    createdAt: String
+    updatedAt: String
+}
+
+input UsuarioInput {
+    username: String!
+    email: String!
+    password: String!
+    nombre: String
+    apellido: String
+    rol: ID!
+}
+
+input UsuarioUpdateInput {
+    id: ID!
+    username: String
+    email: String
+    password: String
+    nombre: String
+    apellido: String
+    rol: ID
+    activo: Boolean
+}
+
+type Query {
+    usuarios: [Usuario]
+    usuario(id: ID!): Usuario
+}
+
+type Mutation {
+    crearUsuario(input: UsuarioInput!): Usuario
+    actualizarUsuario(input: UsuarioUpdateInput!): Usuario
+    eliminarUsuario(id: ID!): Boolean
+}
