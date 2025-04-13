@@ -1,165 +1,216 @@
 package com.function;
 
-import com.microsoft.azure.functions.*;
-import com.microsoft.azure.functions.annotation.AuthorizationLevel;
-import com.microsoft.azure.functions.annotation.FunctionName;
-import com.microsoft.azure.functions.annotation.HttpTrigger;
-import com.function.model.Usuario;
+import com.function.graphql.UsuarioResolver;
 import com.function.service.UsuarioService;
-import com.function.exception.UsuarioNotFoundException;
+import com.function.exception.GraphQLException;
 import com.function.exception.ValidationException;
 import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import com.google.gson.JsonSerializer;
-import com.google.gson.JsonDeserializer;
-import java.time.LocalDateTime;
-import java.util.Optional;
-import java.util.Map;
-import java.util.HashMap;
+import com.microsoft.azure.functions.*;
+import com.microsoft.azure.functions.annotation.*;
 
-/**
- * Azure Functions with HTTP Trigger.
- */
+import graphql.GraphQL;
+import graphql.ExecutionInput;
+import graphql.schema.GraphQLSchema;
+import graphql.schema.idl.*;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.logging.Logger;
+
 public class Function {
-    private static final Gson gson = new GsonBuilder()
-        .registerTypeAdapter(LocalDateTime.class, (JsonSerializer<LocalDateTime>) 
-            (src, typeOfSrc, context) -> context.serialize(src.toString()))
-        .registerTypeAdapter(LocalDateTime.class, (JsonDeserializer<LocalDateTime>) 
-            (json, typeOfT, context) -> LocalDateTime.parse(json.getAsString()))
-        .create();
-    private static final String USUARIO_NO_ENCONTRADO = "Usuario no encontrado";
-    private static final String BODY_VACIO = "El cuerpo de la solicitud está vacío";
-    private static final String ID_REQUERIDO = "Se requiere el ID del usuario";
-    private final UsuarioService usuarioService;
+    private static final String CONTENT_TYPE = "Content-Type";
+    private static final String APPLICATION_JSON = "application/json";
+    private static final String MESSAGE_KEY = "message";
+    private static final String EXTENSIONS_KEY = "extensions";
+    private final GraphQL graphQL;
+    private final Gson gson;
 
     public Function() {
-        this.usuarioService = new UsuarioService();
+        this.gson = new Gson();
+        this.graphQL = initializeGraphQL();
     }
 
-    @FunctionName("usuarios")
-    public HttpResponseMessage run(
+    private GraphQL initializeGraphQL() {
+        InputStream schemaStream = getClass().getClassLoader().getResourceAsStream("schema.graphqls");
+        if (schemaStream == null) {
+            throw new GraphQLException("No se pudo encontrar el archivo schema.graphqls");
+        }
+
+        try {
+            String schemaContent;
+            try (InputStreamReader reader = new InputStreamReader(schemaStream, StandardCharsets.UTF_8)) {
+                StringBuilder sb = new StringBuilder();
+                char[] buffer = new char[1024];
+                int read;
+                while ((read = reader.read(buffer)) != -1) {
+                    sb.append(buffer, 0, read);
+                }
+                schemaContent = sb.toString();
+            }
+
+            SchemaParser schemaParser = new SchemaParser();
+            TypeDefinitionRegistry typeRegistry = schemaParser.parse(schemaContent);
+
+            UsuarioService usuarioService = new UsuarioService();
+            UsuarioResolver usuarioResolver = new UsuarioResolver(usuarioService);
+
+            RuntimeWiring runtimeWiring = RuntimeWiring.newRuntimeWiring()
+                .type("Query", builder -> builder
+                    .dataFetcher("usuarios", usuarioResolver.getUsuariosDataFetcher())
+                    .dataFetcher("usuario", usuarioResolver.getUsuarioDataFetcher()))
+                .type("Mutation", builder -> builder
+                    .dataFetcher("crearUsuario", usuarioResolver.crearUsuarioDataFetcher())
+                    .dataFetcher("actualizarUsuario", usuarioResolver.actualizarUsuarioDataFetcher())
+                    .dataFetcher("eliminarUsuario", usuarioResolver.eliminarUsuarioDataFetcher()))
+                .build();
+
+            SchemaGenerator schemaGenerator = new SchemaGenerator();
+            GraphQLSchema graphQLSchema = schemaGenerator.makeExecutableSchema(typeRegistry, runtimeWiring);
+
+            return GraphQL.newGraphQL(graphQLSchema).build();
+        } catch (IOException e) {
+            throw new GraphQLException("Error al inicializar GraphQL", e);
+        }
+    }
+
+    @FunctionName("graphql-query")
+    public HttpResponseMessage executeQuery(
             @HttpTrigger(
                 name = "req",
-                methods = {HttpMethod.GET, HttpMethod.POST, HttpMethod.PUT, HttpMethod.DELETE},
+                methods = {HttpMethod.POST},
                 authLevel = AuthorizationLevel.ANONYMOUS)
                 HttpRequestMessage<Optional<String>> request,
             final ExecutionContext context) {
-
-        String method = request.getHttpMethod().name();
-
+        
         try {
-            switch (method) {
-                case "GET":
-                    return handleGet(request);
-                case "POST":
-                    return handlePost(request);
-                case "PUT":
-                    return handlePut(request);
-                case "DELETE":
-                    return handleDelete(request);
-                default:
-                    return request.createResponseBuilder(HttpStatus.METHOD_NOT_ALLOWED)
-                            .body("Método HTTP no soportado")
-                            .build();
+            String body = request.getBody()
+                .orElseThrow(() -> new ValidationException(Collections.singletonList("Se requiere el cuerpo de la solicitud")));
+            
+            @SuppressWarnings("unchecked")
+            Map<String, Object> json = gson.fromJson(body, Map.class);
+            String query = (String) json.get("query");
+            
+            if (query == null || query.trim().isEmpty()) {
+                throw new ValidationException(Collections.singletonList("Se requiere una consulta GraphQL"));
             }
-        } catch (ValidationException e) {
-            Map<String, Object> response = new HashMap<>();
-            response.put("error", "Error de validación");
-            response.put("detalles", e.getViolations());
-            return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
-                    .body(gson.toJson(response))
+
+            if (query.trim().toLowerCase().startsWith("mutation")) {
+                throw new ValidationException(Collections.singletonList("Esta función es solo para queries. Use /api/graphql-mutation para mutaciones."));
+            }
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> variables = (Map<String, Object>) json.getOrDefault("variables", new HashMap<>());
+
+            if (context != null && context.getLogger() != null) {
+                Logger logger = context.getLogger();
+                logger.info(String.format("Ejecutando query GraphQL: %s", query));
+                logger.info(String.format("Variables: %s", gson.toJson(variables)));
+            }
+
+            ExecutionInput executionInput = ExecutionInput.newExecutionInput()
+                .query(query)
+                .variables(variables)
+                .build();
+
+            Map<String, Object> result = graphQL.execute(executionInput).toSpecification();
+            
+            return request.createResponseBuilder(HttpStatus.OK)
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(gson.toJson(result))
                     .build();
-        } catch (UsuarioNotFoundException e) {
-            return request.createResponseBuilder(HttpStatus.NOT_FOUND)
-                    .body(e.getMessage())
-                    .build();
+                    
         } catch (Exception e) {
-            context.getLogger().severe("Error: " + e.getMessage());
-            return request.createResponseBuilder(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body("Error interno del servidor: " + e.getMessage())
-                    .build();
+            return handleError(e, context, request);
         }
     }
 
-    private HttpResponseMessage handleGet(HttpRequestMessage<Optional<String>> request) {
-        String id = request.getQueryParameters().get("id");
-        if (id != null) {
-            try {
-                Usuario usuario = usuarioService.obtenerPorId(Long.parseLong(id));
-                if (usuario == null) {
-                    throw new UsuarioNotFoundException(USUARIO_NO_ENCONTRADO);
-                }
-                return request.createResponseBuilder(HttpStatus.OK)
-                        .body(gson.toJson(usuario))
-                        .build();
-            } catch (NumberFormatException e) {
-                return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
-                        .body("ID inválido")
-                        .build();
+    @FunctionName("graphql-mutation")
+    public HttpResponseMessage executeMutation(
+            @HttpTrigger(
+                name = "req",
+                methods = {HttpMethod.POST},
+                authLevel = AuthorizationLevel.ANONYMOUS)
+                HttpRequestMessage<Optional<String>> request,
+            final ExecutionContext context) {
+        
+        try {
+            String body = request.getBody()
+                .orElseThrow(() -> new ValidationException(Collections.singletonList("Se requiere el cuerpo de la solicitud")));
+            
+            @SuppressWarnings("unchecked")
+            Map<String, Object> json = gson.fromJson(body, Map.class);
+            String query = (String) json.get("query");
+            
+            if (query == null || query.trim().isEmpty()) {
+                throw new ValidationException(Collections.singletonList("Se requiere una mutación GraphQL"));
+            }
+
+            if (!query.trim().toLowerCase().startsWith("mutation")) {
+                throw new ValidationException(Collections.singletonList("Esta función es solo para mutaciones. Use /api/graphql-query para queries."));
+            }
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> variables = (Map<String, Object>) json.getOrDefault("variables", new HashMap<>());
+
+            if (context != null && context.getLogger() != null) {
+                Logger logger = context.getLogger();
+                logger.info(String.format("Ejecutando mutation GraphQL: %s", query));
+                logger.info(String.format("Variables: %s", gson.toJson(variables)));
+            }
+
+            ExecutionInput executionInput = ExecutionInput.newExecutionInput()
+                .query(query)
+                .variables(variables)
+                .build();
+
+            Map<String, Object> result = graphQL.execute(executionInput).toSpecification();
+            
+            return request.createResponseBuilder(HttpStatus.OK)
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(gson.toJson(result))
+                    .build();
+                    
+        } catch (Exception e) {
+            return handleError(e, context, request);
+        }
+    }
+
+    private HttpResponseMessage handleError(Exception e, ExecutionContext context, HttpRequestMessage<Optional<String>> request) {
+        if (context != null && context.getLogger() != null) {
+            Logger logger = context.getLogger();
+            logger.severe("Error al procesar la solicitud GraphQL: " + e.getMessage());
+            if (e.getCause() != null) {
+                logger.severe("Causa: " + e.getCause().getMessage());
             }
         }
         
-        return request.createResponseBuilder(HttpStatus.OK)
-                .body(gson.toJson(usuarioService.obtenerTodos()))
-                .build();
-    }
+        Map<String, Object> error = new HashMap<>();
+        HttpStatus status = HttpStatus.BAD_REQUEST;
 
-    private HttpResponseMessage handlePost(HttpRequestMessage<Optional<String>> request) {
-        String requestBody = request.getBody().orElse("");
-        if (requestBody.isEmpty()) {
-            return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
-                    .body(BODY_VACIO)
-                    .build();
+        if (e instanceof ValidationException) {
+            ValidationException validationException = (ValidationException) e;
+            error.put(MESSAGE_KEY, e.getMessage());
+            error.put(EXTENSIONS_KEY, validationException.getExtensions());
+        } else if (e instanceof GraphQLException) {
+            GraphQLException graphQLException = (GraphQLException) e;
+            error.put(MESSAGE_KEY, e.getMessage());
+            if (graphQLException.getExtensions() != null) {
+                error.put(EXTENSIONS_KEY, graphQLException.getExtensions());
+            }
+            if (graphQLException.getCause() != null) {
+                status = HttpStatus.INTERNAL_SERVER_ERROR;
+            }
+        } else {
+            error.put(MESSAGE_KEY, "Error interno del servidor: " + e.getMessage());
+            status = HttpStatus.INTERNAL_SERVER_ERROR;
         }
-
-        Usuario nuevoUsuario = gson.fromJson(requestBody, Usuario.class);
-        Usuario usuarioCreado = usuarioService.crear(nuevoUsuario);
         
-        return request.createResponseBuilder(HttpStatus.CREATED)
-                .body(gson.toJson(usuarioCreado))
+        return request.createResponseBuilder(status)
+                .header(CONTENT_TYPE, APPLICATION_JSON)
+                .body(gson.toJson(Map.of("errors", Collections.singletonList(error))))
                 .build();
-    }
-
-    private HttpResponseMessage handlePut(HttpRequestMessage<Optional<String>> request) {
-        String updateBody = request.getBody().orElse("");
-        if (updateBody.isEmpty()) {
-            return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
-                    .body(BODY_VACIO)
-                    .build();
-        }
-
-        Usuario usuarioActualizado = gson.fromJson(updateBody, Usuario.class);
-        if (usuarioActualizado.getId() == null) {
-            return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
-                    .body(ID_REQUERIDO)
-                    .build();
-        }
-
-        try {
-            Usuario resultado = usuarioService.actualizar(usuarioActualizado);
-            return request.createResponseBuilder(HttpStatus.OK)
-                    .body(gson.toJson(resultado))
-                    .build();
-        } catch (RuntimeException e) {
-            throw new UsuarioNotFoundException(USUARIO_NO_ENCONTRADO);
-        }
-    }
-
-    private HttpResponseMessage handleDelete(HttpRequestMessage<Optional<String>> request) {
-        String deleteId = request.getQueryParameters().get("id");
-        if (deleteId == null) {
-            return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
-                    .body(ID_REQUERIDO)
-                    .build();
-        }
-
-        try {
-            usuarioService.eliminar(Long.parseLong(deleteId));
-            return request.createResponseBuilder(HttpStatus.OK)
-                    .body("Usuario eliminado correctamente")
-                    .build();
-        } catch (RuntimeException e) {
-            throw new UsuarioNotFoundException(USUARIO_NO_ENCONTRADO);
-        }
     }
 }
