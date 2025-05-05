@@ -70,7 +70,6 @@ public class UsuarioResolver {
         EntityManager em = emf.createEntityManager();
         try {
             if (rolId instanceof String) {
-                // Si es un String, asumimos que es el ID del rol
                 Long id = Long.parseLong((String) rolId);
                 Rol rol = em.find(Rol.class, id);
                 if (rol == null) {
@@ -78,7 +77,6 @@ public class UsuarioResolver {
                 }
                 return rol;
             } else if (rolId instanceof Number) {
-                // Si es un número, lo convertimos a Long
                 Long id = ((Number) rolId).longValue();
                 Rol rol = em.find(Rol.class, id);
                 if (rol == null) {
@@ -101,7 +99,6 @@ public class UsuarioResolver {
         usuario.setNombre((String) input.get(FIELD_NOMBRE));
         usuario.setApellido((String) input.get(FIELD_APELLIDO));
         
-        // Obtener el rol existente por ID
         Rol rol = obtenerRol(input.get(FIELD_ROL));
         usuario.setRol(rol);
         
