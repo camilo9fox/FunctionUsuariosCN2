@@ -38,7 +38,6 @@ public class Usuario {
     @Column(name = "apellido", length = 100)
     private String apellido;
 
-    @NotNull(message = "El rol es obligatorio")
     @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "rol_id", nullable = false)
     private Rol rol;

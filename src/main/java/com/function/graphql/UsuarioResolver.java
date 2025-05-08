@@ -60,10 +60,7 @@ public class UsuarioResolver {
             errores.add("La contraseña debe tener al menos 6 caracteres");
         }
         
-        Object rolId = input.get(FIELD_ROL);
-        if (rolId == null) {
-            errores.add("El rol es requerido");
-        }
+        // El rol ya no es requerido, se asignará automáticamente si no se proporciona
     }
 
     private Rol obtenerRol(Object rolId) {
@@ -99,7 +96,11 @@ public class UsuarioResolver {
         usuario.setNombre((String) input.get(FIELD_NOMBRE));
         usuario.setApellido((String) input.get(FIELD_APELLIDO));
         
-        Rol rol = obtenerRol(input.get(FIELD_ROL));
+        Object rolId = input.get(FIELD_ROL);
+        if (rolId == null) {
+            rolId = 41L; 
+        }
+        Rol rol = obtenerRol(rolId);
         usuario.setRol(rol);
         
         usuario.setActivo(true);

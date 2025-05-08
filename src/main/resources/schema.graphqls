@@ -23,7 +23,7 @@ input UsuarioInput {
     password: String!
     nombre: String
     apellido: String
-    rol: ID!
+    rol: ID
 }
 
 input UsuarioUpdateInput {
